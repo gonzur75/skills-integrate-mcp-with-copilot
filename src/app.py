@@ -5,12 +5,15 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+from fastapi.security import HTTPBearer, HTTPAuthCredentials
 from pathlib import Path
 import os
 import sqlite3
+import json
+import secrets
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -21,6 +24,52 @@ app.mount("/static", StaticFiles(directory=os.path.join(current_dir,
           "static")), name="static")
 
 DATABASE_PATH = current_dir / "activities.db"
+TEACHERS_PATH = current_dir / "teachers.json"
+TOKENS_PATH = current_dir / "tokens.json"
+security = HTTPBearer()
+
+
+def load_teachers():
+    """Load teacher credentials from JSON file"""
+    if not TEACHERS_PATH.exists():
+        return {}
+    with open(TEACHERS_PATH) as f:
+        return json.load(f)
+
+
+def initialize_teachers():
+    """Create initial teachers.json with sample credentials"""
+    if not TEACHERS_PATH.exists():
+        teachers = {
+            "mrsmith": "teacher123",
+            "mschen": "instruction456"
+        }
+        with open(TEACHERS_PATH, 'w') as f:
+            json.dump(teachers, f, indent=2)
+
+
+def load_tokens():
+    """Load valid session tokens"""
+    if not TOKENS_PATH.exists():
+        return {}
+    with open(TOKENS_PATH) as f:
+        return json.load(f)
+
+
+def save_tokens(tokens):
+    """Save valid session tokens"""
+    with open(TOKENS_PATH, 'w') as f:
+        json.dump(tokens, f)
+
+
+def verify_teacher_token(credentials: HTTPAuthCredentials) -> str:
+    """Verify teacher authentication token and return username"""
+    tokens = load_tokens()
+    token = credentials.credentials
+    if token not in tokens:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return tokens[token]
+
 
 SEED_ACTIVITIES = {
     "Chess Club": {
@@ -182,11 +231,28 @@ def load_activities():
 
 
 initialize_database()
+initialize_teachers()
 
 
 @app.get("/")
 def root():
     return RedirectResponse(url="/static/index.html")
+
+
+@app.post("/login")
+def login(username: str, password: str):
+    """Authenticate a teacher and return a session token"""
+    teachers = load_teachers()
+    
+    if username not in teachers or teachers[username] != password:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    
+    token = secrets.token_urlsafe(32)
+    tokens = load_tokens()
+    tokens[token] = username
+    save_tokens(tokens)
+    
+    return {"token": token, "username": username}
 
 
 @app.get("/activities")
@@ -195,8 +261,10 @@ def get_activities():
 
 
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
-    """Sign up a student for an activity"""
+def signup_for_activity(activity_name: str, email: str, credentials: HTTPAuthCredentials = Depends(security)):
+    """Sign up a student for an activity (teachers only)"""
+    username = verify_teacher_token(credentials)
+    
     activity = load_activity(activity_name)
     if activity is None:
         raise HTTPException(status_code=404, detail="Activity not found")
@@ -215,12 +283,14 @@ def signup_for_activity(activity_name: str, email: str):
     conn.commit()
     conn.close()
 
-    return {"message": f"Signed up {email} for {activity_name}"}
+    return {"message": f"Signed up {email} for {activity_name}", "performed_by": username}
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
-    """Unregister a student from an activity"""
+def unregister_from_activity(activity_name: str, email: str, credentials: HTTPAuthCredentials = Depends(security)):
+    """Unregister a student from an activity (teachers only)"""
+    username = verify_teacher_token(credentials)
+    
     activity = load_activity(activity_name)
     if activity is None:
         raise HTTPException(status_code=404, detail="Activity not found")
@@ -239,4 +309,4 @@ def unregister_from_activity(activity_name: str, email: str):
     conn.commit()
     conn.close()
 
-    return {"message": f"Unregistered {email} from {activity_name}"}
+    return {"message": f"Unregistered {email} from {activity_name}", "performed_by": username}
